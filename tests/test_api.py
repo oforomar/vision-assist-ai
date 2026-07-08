@@ -64,6 +64,9 @@ def test_caption_returns_caption_classification_and_metadata(client):
     assert meta["output_tokens"] == 6
     assert meta["total_tokens"] == 7
     assert meta["latency_ms"] == 12.34
+    # Total handler time: covers decode + generate + classify, so never below inference time.
+    # The stub's generate() takes ~0ms, so this is small but present.
+    assert meta["request_ms"] >= 0
     assert meta["image_width"] == 8
     assert meta["image_height"] == 8
     assert meta["generated_at"]
@@ -87,6 +90,16 @@ def test_caption_503_when_model_not_loaded(monkeypatch):
     monkeypatch.setattr(main, "captioner", stub)
     resp = TestClient(main.app).post("/caption", json={"image_base64": _png_b64()})
     assert resp.status_code == 503
+
+
+def test_metrics_exposes_latency_histograms(client):
+    # One caption call populates the custom histograms...
+    assert client.post("/caption", json={"image_base64": _png_b64()}).status_code == 200
+    # ...which the Prometheus endpoint then reports.
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    assert "ai_inference_seconds" in resp.text
+    assert "ai_request_seconds_count" in resp.text
 
 
 def test_health(client):

@@ -2,6 +2,8 @@ fastapi
 uvicorn[standard]
 pydantic
 Pillow
+# Prometheus /metrics endpoint + default HTTP metrics (scraped by the VM's Prometheus).
+prometheus-fastapi-instrumentator
 torch
 # torchvision is required by Qwen2-VL's AutoProcessor (it loads Qwen2VLVideoProcessor even for
 # image-only use); without it the model load throws ImportError at startup.

@@ -50,6 +50,9 @@ async def caption(_: CaptionRequest):
             "output_tokens": words,
             "total_tokens": 1 + words,
             "latency_ms": float(LATENCY_MS),
+            # Real service reports total handler time (decode + inference + classify); fake a
+            # couple of ms of overhead so latency consumers see the request_ms > latency_ms shape.
+            "request_ms": float(LATENCY_MS) + 2.5,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         },
     }

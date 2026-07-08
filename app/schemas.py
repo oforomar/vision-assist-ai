@@ -37,6 +37,13 @@ class CaptionMetadata(BaseModel):
     output_tokens: int = Field(..., description="Tokens generated for the caption.")
     total_tokens: int
     latency_ms: float = Field(..., description="Wall-clock time spent in model.generate().")
+    request_ms: float = Field(
+        ...,
+        description=(
+            "Total server-side handling time for this request "
+            "(decode + preprocess + inference + classify). Always >= latency_ms."
+        ),
+    )
     image_width: int
     image_height: int
     generated_at: str = Field(..., description="UTC ISO-8601 timestamp.")

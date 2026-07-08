@@ -8,6 +8,7 @@ token/latency metadata.
 
 import base64
 import binascii
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from io import BytesIO
@@ -15,6 +16,8 @@ from io import BytesIO
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, UnidentifiedImageError
+from prometheus_client import Histogram
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.captioning.model import Captioner
 from app.classification.classifier import DangerClassifier
@@ -30,6 +33,17 @@ from app.schemas import (
 # Module-level singletons. The model is loaded once at startup (lifespan); the classifier is cheap.
 captioner = Captioner()
 classifier = DangerClassifier()
+
+# Latency histograms scraped via /metrics. Buckets span a warm GPU (<0.5s) to a cold/CPU box (~10s).
+_LATENCY_BUCKETS = (0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.5, 4.0, 6.0, 10.0)
+INFERENCE_SECONDS = Histogram(
+    "ai_inference_seconds", "GPU inference time (model.generate only).", buckets=_LATENCY_BUCKETS
+)
+REQUEST_SECONDS = Histogram(
+    "ai_request_seconds",
+    "Total /caption handler time (decode + preprocess + inference + classify).",
+    buckets=_LATENCY_BUCKETS,
+)
 
 
 @asynccontextmanager
@@ -53,6 +67,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Default HTTP metrics + GET /metrics for Prometheus (internal-only in deployment).
+Instrumentator().instrument(app).expose(app, include_in_schema=False)
+
 
 def _decode_image(image_base64: str) -> Image.Image:
     """Decodes a (possibly data-URL prefixed) base64 string into an RGB image."""
@@ -72,9 +89,17 @@ def caption(request: CaptionRequest) -> CaptionResponse:
     if not captioner.is_loaded:
         raise HTTPException(status_code=503, detail="Model is still loading. Try again shortly.")
 
+    # Total server-side handling time; latency_ms below covers only model.generate(), so the
+    # difference is the decode/preprocess/classify overhead. The backend times its own call around
+    # this request, letting the client attribute network vs server time per caption.
+    request_start = time.perf_counter()
     image = _decode_image(request.image_base64)
     result = captioner.generate(image, prompt=request.prompt)
     label, reason = classifier.classify(result["caption"])
+
+    request_seconds = time.perf_counter() - request_start
+    INFERENCE_SECONDS.observe(result["latency_ms"] / 1000)
+    REQUEST_SECONDS.observe(request_seconds)
 
     return CaptionResponse(
         caption=result["caption"],
@@ -86,6 +111,7 @@ def caption(request: CaptionRequest) -> CaptionResponse:
             output_tokens=result["output_tokens"],
             total_tokens=result["total_tokens"],
             latency_ms=result["latency_ms"],
+            request_ms=round(request_seconds * 1000, 2),
             image_width=image.width,
             image_height=image.height,
             generated_at=datetime.now(timezone.utc).isoformat(),
