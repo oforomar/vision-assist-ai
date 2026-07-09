@@ -35,13 +35,33 @@ class Captioner:
         from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # fp16 on GPU (T4 has no bf16); fp32 on CPU. On Ampere+ GPUs bf16 is preferable.
-        dtype = torch.float16 if self.device == "cuda" else torch.float32
+        # bf16 on GPU: native on Blackwell (RTX PRO 6000) and Ampere+; fp32 on CPU.
+        dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
 
-        print(f"Loading {self.model_name} on {self.device} ({dtype})...")
-        self.processor = AutoProcessor.from_pretrained(self.model_name)
+        # FlashAttention 2 cuts attention time on the vision-token-heavy prefill.
+        # Falls back to PyTorch SDPA (no extra dependency) if flash-attn isn't installed.
+        if self.device == "cuda":
+            try:
+                import flash_attn  # noqa: F401
+                attn_implementation = "flash_attention_2"
+            except ImportError:
+                attn_implementation = "sdpa"
+        else:
+            attn_implementation = "eager"
+
+        print(f"Loading {self.model_name} on {self.device} ({dtype}, attn={attn_implementation})...")
+        # Cap vision tokens: input tokens (and thus prefill latency) scale with image
+        # resolution. The default max_pixels allows much larger images than captioning
+        # needs. Tune max_pixels if captions lose small-object detail.
+        self.processor = AutoProcessor.from_pretrained(
+            self.model_name,
+            min_pixels=256 * 28 * 28,
+            max_pixels=768 * 28 * 28,
+        )
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-            self.model_name, torch_dtype=dtype
+            self.model_name,
+            torch_dtype=dtype,
+            attn_implementation=attn_implementation,
         ).to(self.device)
         self.model.eval()
         print("Model loaded.")
@@ -85,11 +105,13 @@ class Captioner:
         input_len = int(inputs.input_ids.shape[-1])
 
         start = time.perf_counter()
-        with torch.no_grad():
+        with torch.inference_mode():
             generated_ids = self.model.generate(
                 **inputs,
                 max_new_tokens=self.max_new_tokens,
                 do_sample=False,  # deterministic greedy decode, matching the author's reference usage
+                use_cache=True,
+                pad_token_id=self.processor.tokenizer.eos_token_id,
             )
         latency_ms = (time.perf_counter() - start) * 1000
 
